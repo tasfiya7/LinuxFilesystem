@@ -112,93 +112,94 @@ static inode_t *resolve_path(filesystem_t *fs, inode_t *start, char *path, fs_re
 
 
 
-int new_file(terminal_context_t *context, char *path, permission_t perms)
-{if (!context || !path) {
-    REPORT_RETCODE(INVALID_INPUT);
-    return 0;
-}
-
-// Copy path and split
-char path_copy[strlen(path) + 1];
-strcpy(path_copy, path);
-
-// Find basename
-char *saveptr;
-char *token = strtok_r(path_copy, "/", &saveptr);
-char *prev_token = token;
-
-while (token) {
-    prev_token = token;
-    token = strtok_r(NULL, "/", &saveptr);
-}
-
-// Re-parse dirname
-strcpy(path_copy, path);
-char *last_slash = strrchr(path_copy, '/');
-if (last_slash) {
-    *last_slash = '\0';
-} else {
-    strcpy(path_copy, ".");
-}
-
-fs_retcode_t ret;
-inode_t *parent = resolve_path(context->fs, context->working_directory, path_copy, &ret, 0);
-if (!parent) {
-    REPORT_RETCODE(ret);
-    return -1;
-}
-
-if (get_child_inode(context->fs, parent, prev_token)) {
-    REPORT_RETCODE(FILE_EXIST);
-    return -1;
-}
-
-inode_index_t inode_idx;
-if (claim_available_inode(context->fs, &inode_idx) != SUCCESS) {
-    REPORT_RETCODE(INODE_UNAVAILABLE);
-    return -1;
-}
-
-dblock_index_t dblock_idx;
-if (claim_available_dblock(context->fs, &dblock_idx) != SUCCESS) {
-    release_inode(context->fs, &context->fs->inodes[inode_idx]);
-    REPORT_RETCODE(DBLOCK_UNAVAILABLE);
-    return -1;
-}
-
-// Setup the new file's inode
-inode_t *new_inode = &context->fs->inodes[inode_idx];
-new_inode->internal.file_type = DATA_FILE;
-new_inode->internal.file_perms = perms;
-strncpy(new_inode->internal.file_name, prev_token, MAX_FILE_NAME_LEN);
-new_inode->internal.file_size = 0;
-memset(new_inode->internal.direct_data, 0, sizeof(new_inode->internal.direct_data));
-new_inode->internal.direct_data[0] = dblock_idx;
-new_inode->internal.indirect_dblock = 0;
-
-// Create directory entry
-size_t count = dir_entry_count(parent->internal.file_size);
-directory_entry_t *entries = (directory_entry_t *)(context->fs->dblocks + parent->internal.direct_data[0] * DATA_BLOCK_SIZE);
-int written = 0;
-
-// Check for tombstone
-for (size_t i = 0; i < count; ++i) {
-    if (entries[i].inode_index == 0) {
-        entries[i].inode_index = inode_idx;
-        strncpy(entries[i].name, prev_token, MAX_FILE_NAME_LEN);
-        written = 1;
-        break;
+int new_file(terminal_context_t *context, char *path, permission_t perms){
+   if (!context || !path) {
+        REPORT_RETCODE(INVALID_INPUT);
+        return 0;
     }
-}
 
-// No tombstone, append entry
-if (!written) {
-    entries[count].inode_index = inode_idx;
-    strncpy(entries[count].name, prev_token, MAX_FILE_NAME_LEN);
-    parent->internal.file_size += sizeof(directory_entry_t);
-}
+    // Copy path and split
+    char path_copy[strlen(path) + 1];
+    strcpy(path_copy, path);
 
-return 0;
+    // Find basename (final component)
+    char *saveptr;
+    char *token = strtok_r(path_copy, "/", &saveptr);
+    char *prev_token = token;
+
+    while (token) {
+        prev_token = token;
+        token = strtok_r(NULL, "/", &saveptr);
+    }
+
+    // Re-parse dirname
+    strcpy(path_copy, path);
+    char *last_slash = strrchr(path_copy, '/');
+    if (last_slash) {
+        *last_slash = '\0';
+    } else {
+        strcpy(path_copy, ".");
+    }
+
+    fs_retcode_t ret;
+    inode_t *parent = resolve_path(context->fs, context->working_directory, path_copy, &ret, 0);
+    if (!parent) {
+        REPORT_RETCODE(ret);
+        return -1;
+    }
+
+    if (get_child_inode(context->fs, parent, prev_token)) {
+        REPORT_RETCODE(FILE_EXIST);
+        return -1;
+    }
+
+    inode_index_t inode_idx;
+    if (claim_available_inode(context->fs, &inode_idx) != SUCCESS) {
+        REPORT_RETCODE(INODE_UNAVAILABLE);
+        return -1;
+    }
+
+    dblock_index_t dblock_idx;
+    if (claim_available_dblock(context->fs, &dblock_idx) != SUCCESS) {
+        release_inode(context->fs, &context->fs->inodes[inode_idx]);
+        REPORT_RETCODE(INSUFFICIENT_DBLOCKS); // Fixed error code
+        return -1;
+    }
+
+    // Zero out the allocated data block
+    memset(context->fs->dblocks + dblock_idx * DATA_BLOCK_SIZE, 0, DATA_BLOCK_SIZE);
+
+    // Setup the new file's inode
+    inode_t *new_inode = &context->fs->inodes[inode_idx];
+    new_inode->internal.file_type = DATA_FILE;
+    new_inode->internal.file_perms = FS_READ | FS_WRITE; // default file permission
+    strncpy(new_inode->internal.file_name, prev_token, MAX_FILE_NAME_LEN);
+    new_inode->internal.file_size = 0;
+    memset(new_inode->internal.direct_data, 0, sizeof(new_inode->internal.direct_data));
+    new_inode->internal.direct_data[0] = dblock_idx;
+    new_inode->internal.indirect_dblock = 0;
+
+    // Create directory entry
+    size_t count = dir_entry_count(parent->internal.file_size);
+    directory_entry_t *entries = (directory_entry_t *)(context->fs->dblocks + parent->internal.direct_data[0] * DATA_BLOCK_SIZE);
+    int written = 0;
+
+    for (size_t i = 0; i < count; ++i) {
+        if (entries[i].inode_index == 0) {
+            entries[i].inode_index = inode_idx;
+            strncpy(entries[i].name, prev_token, MAX_FILE_NAME_LEN);
+            written = 1;
+            break;
+        }
+    }
+
+    if (!written) {
+        entries[count].inode_index = inode_idx;
+        strncpy(entries[count].name, prev_token, MAX_FILE_NAME_LEN);
+        parent->internal.file_size += sizeof(directory_entry_t);
+    }
+
+    return 0;
 }
 
 
@@ -428,64 +429,45 @@ char *get_path_string(terminal_context_t *context)
 }
 
 static void print_tree(filesystem_t *fs, inode_t *inode, int level) {
-    char indent[100] = {0};
-    memset(indent, ' ', level * 2);  // 2 spaces per level
+    if (!inode) return;
 
-    file_type_t type = inode->internal.file_type;
-    permission_t perms = inode->internal.file_perms;
-    size_t size = inode->internal.file_size;
-    char *name = inode->internal.file_name;
+    // Print file or directory name with correct indentation
+    printf("%*s%s\n", level * 3, "", inode->internal.file_name);
 
-    printf("%s", indent);
-    print_permissions(type, perms); 
-    printf("\t%lu\t%s", size, name);
+    if (inode->internal.file_type != DIRECTORY) return;
 
-    if (type == DIRECTORY && inode != &fs->inodes[0]) {
-        inode_t *parent = get_child_inode(fs, inode, "..");
-        if (parent) {
-            printf(" -> %s", parent->internal.file_name);
+    // Iterate through directory entries
+    byte *block = fs->dblocks + inode->internal.direct_data[0] * DATA_BLOCK_SIZE;
+    size_t entries = inode->internal.file_size / DIRECTORY_ENTRY_SIZE;
+
+    for (size_t i = 0; i < entries; ++i) {
+        directory_entry_t *entry = (directory_entry_t *)(block + i * DIRECTORY_ENTRY_SIZE);
+
+        if (entry->inode_index == 0 || strcmp(entry->name, ".") == 0 || strcmp(entry->name, "..") == 0) {
+            continue; // skip empty/tombstone entries and special entries
         }
-    }
 
-    printf("\n");
-
-    if (type != DIRECTORY) return;
-
-    size_t total_size = inode->internal.file_size;
-    size_t entry_count = total_size / (sizeof(inode_index_t) + MAX_FILE_NAME_LEN);
-    byte *entries = malloc(total_size);
-    size_t bytes_read;
-
-    inode_read_data(fs, inode, 0, entries, total_size, &bytes_read);
-
-    for (size_t i = 0; i < entry_count; ++i) {
-        inode_index_t *child_idx = (inode_index_t *)(entries + i * (sizeof(inode_index_t) + MAX_FILE_NAME_LEN));
-        char *child_name = (char *)(entries + i * (sizeof(inode_index_t) + MAX_FILE_NAME_LEN) + sizeof(inode_index_t));
-
-        if (strcmp(child_name, ".") == 0 || strcmp(child_name, "..") == 0)
-            continue;
-
-        inode_t *child = &fs->inodes[*child_idx];
+        inode_t *child = &fs->inodes[entry->inode_index];
         print_tree(fs, child, level + 1);
     }
-
-    free(entries);
 }
 
 
 int tree(terminal_context_t *context, char *path)
 {
-    if (!context || !context->fs || !context->working_directory || !path) return 0;
+    if (!context || !path) return 0;
 
-    fs_retcode_t retcode;
-    inode_t *target = resolve_path(context->fs, context->working_directory, path, &retcode, 0);
+    fs_retcode_t ret;
+    inode_t *target = resolve_path(context->fs, context->working_directory, path, &ret, false);
+
     if (!target) {
-        REPORT_RETCODE(retcode);
+        REPORT_RETCODE(ret == DIR_NOT_FOUND ? NOT_FOUND : ret);
         return -1;
     }
 
     print_tree(context->fs, target, 0);
     return 0;
+
 }
 
 //Part 2
