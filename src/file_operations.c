@@ -310,9 +310,26 @@ int remove_directory(terminal_context_t *context, char *path)
 
 int change_directory(terminal_context_t *context, char *path)
 {
-    (void) context;
-    (void) path;
-    return -2;
+    if (!context || !path) {
+        REPORT_RETCODE(INVALID_INPUT);
+        return 0;
+    }
+
+    fs_retcode_t ret;
+    inode_t *target = resolve_path(context->fs, context->working_directory, path, &ret, 0);
+
+    if (!target) {
+        REPORT_RETCODE(ret);
+        return -1;
+    }
+
+    if (target->internal.file_type != DIRECTORY) {
+        REPORT_RETCODE(INVALID_FILE_TYPE);
+        return -1;
+    }
+
+    context->working_directory = target;
+    return 0;
 }
 
 static void print_permissions(file_type_t type, permission_t perms) {
