@@ -295,17 +295,173 @@ int new_directory(terminal_context_t *context, char *path)
 
 int remove_file(terminal_context_t *context, char *path)
 {
-    (void) context;
-    (void) path;
-    return -2;
+    if (!context || !path) {
+        REPORT_RETCODE(INVALID_INPUT);
+        return 0;
+    }
+
+    fs_retcode_t ret;
+    inode_t *parent;
+    char path_copy[strlen(path) + 1];
+    strcpy(path_copy, path);
+
+    // Extract basename
+    char *saveptr;
+    char *token = strtok_r(path_copy, "/", &saveptr);
+    char *basename = token;
+    while (token) {
+        basename = token;
+        token = strtok_r(NULL, "/", &saveptr);
+    }
+
+    // Get parent path
+    strcpy(path_copy, path);
+    char *last_slash = strrchr(path_copy, '/');
+    if (last_slash) {
+        *last_slash = '\0';
+    } else {
+        strcpy(path_copy, ".");
+    }
+
+    parent = resolve_path(context->fs, context->working_directory, path_copy, &ret, 0);
+    if (!parent || parent->internal.file_type != DIRECTORY) {
+        REPORT_RETCODE(ret);
+        return -1;
+    }
+
+    inode_t *target = get_child_inode(context->fs, parent, basename);
+    if (!target || target->internal.file_type != DATA_FILE) {
+        REPORT_RETCODE(FILE_NOT_FOUND);
+        return -1;
+    }
+
+    // Release data
+    inode_release_data(context->fs, target);
+
+    // Release inode
+    release_inode(context->fs, target);
+
+    // Update parent directory with tombstone
+    size_t count = dir_entry_count(parent->internal.file_size);
+    directory_entry_t *entries = (directory_entry_t *)(context->fs->dblocks + parent->internal.direct_data[0] * DATA_BLOCK_SIZE);
+    for (size_t i = 0; i < count; ++i) {
+        if (strncmp(entries[i].name, basename, MAX_FILE_NAME_LEN) == 0) {
+            entries[i].inode_index = 0;
+            memset(entries[i].name, 0, MAX_FILE_NAME_LEN);
+            break;
+        }
+    }
+
+    return 0;
 }
 
-// we can only delete a directory if it is empty!!
+// can only delete a directory if it is empty
 int remove_directory(terminal_context_t *context, char *path)
 {
-    (void) context;
-    (void) path;
-    return -2;
+    if (!context || !path) {
+        REPORT_RETCODE(INVALID_INPUT);
+        return 0;
+    }
+
+    // Parse path and get base name
+    char path_copy[strlen(path) + 1];
+    strcpy(path_copy, path);
+
+    char *saveptr;
+    char *token = strtok_r(path_copy, "/", &saveptr);
+    char *prev_token = token;
+    while (token) {
+        prev_token = token;
+        token = strtok_r(NULL, "/", &saveptr);
+    }
+
+    if (strcmp(prev_token, ".") == 0 || strcmp(prev_token, "..") == 0) {
+        REPORT_RETCODE(INVALID_FILENAME);
+        return -1;
+    }
+
+    // Re-parse dirname path
+    strcpy(path_copy, path);
+    char *last_slash = strrchr(path_copy, '/');
+    if (last_slash)
+        *last_slash = '\0';
+    else
+        strcpy(path_copy, ".");
+
+    fs_retcode_t ret;
+    inode_t *parent = resolve_path(context->fs, context->working_directory, path_copy, &ret, 0);
+    if (!parent) {
+        REPORT_RETCODE(ret);
+        return -1;
+    }
+
+    inode_t *target = get_child_inode(context->fs, parent, prev_token);
+    if (!target || target->internal.file_type != DIRECTORY) {
+        REPORT_RETCODE(DIR_NOT_FOUND);
+        return -1;
+    }
+
+    if (target == context->working_directory) {
+        REPORT_RETCODE(ATTEMPT_DELETE_CWD);
+        return -1;
+    }
+
+   
+    size_t dir_size = target->internal.file_size;
+    size_t entry_count = dir_entry_count(dir_size);
+    directory_entry_t *entries = (directory_entry_t *)(context->fs->dblocks + target->internal.direct_data[0] * DATA_BLOCK_SIZE);
+
+    int non_special_count = 0;
+    for (size_t i = 0; i < entry_count; ++i) {
+        if (entries[i].inode_index != 0 &&
+            strcmp(entries[i].name, ".") != 0 &&
+            strcmp(entries[i].name, "..") != 0) {
+            non_special_count++;
+        }
+    }
+
+    if (non_special_count > 0) {
+        REPORT_RETCODE(DIR_NOT_EMPTY);
+        return -1;
+    }
+
+    
+    size_t parent_entry_count = dir_entry_count(parent->internal.file_size);
+    directory_entry_t *parent_entries = (directory_entry_t *)(context->fs->dblocks + parent->internal.direct_data[0] * DATA_BLOCK_SIZE);
+
+    int found_index = -1;
+    for (size_t i = 0; i < parent_entry_count; ++i) {
+        if (parent_entries[i].inode_index != 0 &&
+            strncmp(parent_entries[i].name, prev_token, MAX_FILE_NAME_LEN) == 0) {
+            parent_entries[i].inode_index = 0;
+            memset(parent_entries[i].name, 0, MAX_FILE_NAME_LEN);
+            found_index = i;
+            break;
+        }
+    }
+
+    if (found_index == -1) {
+        REPORT_RETCODE(SYSTEM_ERROR);
+        return -1;
+    }
+
+    //  Shrink file if tombstone was at the end
+    int shrink = 1;
+    for (size_t i = found_index + 1; i < parent_entry_count; ++i) {
+        if (parent_entries[i].inode_index != 0) {
+            shrink = 0;
+            break;
+        }
+    }
+    if (shrink) {
+        parent->internal.file_size -= sizeof(directory_entry_t);
+    }
+
+    
+    inode_release_data(context->fs, target);
+    release_inode(context->fs, target);
+
+    return 0;
 }
 
 int change_directory(terminal_context_t *context, char *path)
